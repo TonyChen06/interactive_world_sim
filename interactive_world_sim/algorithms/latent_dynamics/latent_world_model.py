@@ -485,6 +485,29 @@ class LatentWorldModel(BasePytorchAlgo):
 
         return t.long(), s.long()
 
+    @torch.no_grad()
+    def _generated_history_context(self, z, action):
+        probability = 0.5 * min(1.0, max(0.0, (self.global_step - 10000) / 10000))
+        if not self.cfg.get("generated_history", False) or probability == 0:
+            return None
+        steps = self.cfg.get("generated_history_steps", 3)
+        assert isinstance(steps, int) and 1 <= steps < z.shape[0] - 1
+        with torch.random.fork_rng(devices=[z.device.index] if z.is_cuda else []):
+            seed = int(os.environ.get("PL_GLOBAL_SEED", 42)) + 1000003 + self.global_step * 16 + self.global_rank
+            torch.random.default_generator.manual_seed(seed)
+            if z.is_cuda:
+                with torch.cuda.device(z.device):
+                    torch.cuda.manual_seed(seed)
+            if torch.rand(()).item() >= probability:
+                return None
+            predicted = self.dynamics_forward(
+                rearrange(z[:-(steps + 1)], "t b c h w -> b t c h w"),
+                rearrange(action[:-1].clone(), "t b a -> b t a"),
+            )
+            context = z.clone()
+            context[-(steps + 1):-1] = rearrange(predicted, "b t c h w -> t b c h w")
+            return context
+
     def training_step(self, batch: dict, batch_idx: int) -> STEP_OUTPUT:
         """Training step of the model"""
         if batch["obs"][self.obs_keys[0]].shape[0] == 0:
@@ -593,10 +616,16 @@ class LatentWorldModel(BasePytorchAlgo):
             z = rearrange(z, "(b t) c h w -> t b c h w", b=obs.shape[0])
             action = rearrange(action, "b t a -> t b a")
 
+            context = self._generated_history_context(z, action)
             t, s = self._generate_noise_levels(z, self.dyn_infer_steps)
             weights_t = self.noise_scheduler.get_weights(t)
             weights_s = self.noise_scheduler.get_weights(s)
-            noisy_z_t, noisy_z_s = self.noise_scheduler.add_noise_to_t_s(z, t, s)
+            if context is None:
+                noisy_z_t, noisy_z_s = self.noise_scheduler.add_noise_to_t_s(z, t, s)
+            else:
+                noise = torch.randn_like(z).clamp(-self.clip_noise, self.clip_noise)
+                noisy_z_t = self.noise_scheduler.q_sample(context, t, noise=noise)
+                noisy_z_s = self.noise_scheduler.q_sample(z, s, noise=noise)
 
             u = torch.zeros_like(t).to(self.device)
             if self.mask_prev_action:
