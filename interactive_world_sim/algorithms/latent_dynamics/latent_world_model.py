@@ -135,6 +135,12 @@ class LatentWorldModel(BasePytorchAlgo):
             FrechetVideoDistance() if "fvd" in self.metrics else None
         )
 
+    def on_load_checkpoint(self, checkpoint: dict[str, Any]) -> None:
+        # Older checkpoints may omit optional evaluation metrics; keep model loading strict.
+        for key, value in self.state_dict().items():
+            if key.startswith(("validation_lpips_model.", "validation_fid_model.")):
+                checkpoint["state_dict"].setdefault(key, value)
+
     def set_normalizer(self, normalizer: LinearNormalizer) -> None:
         """Set the normalizer for the model"""
         self.normalizer.load_state_dict(normalizer.state_dict())
@@ -791,6 +797,9 @@ class LatentWorldModel(BasePytorchAlgo):
                 logger=self.logger.experiment,
             )
 
+        for metric in (self.validation_lpips_model, self.validation_fid_model):
+            if metric is not None:
+                metric.to(xs_pred.device)
         metric_dict = get_validation_metrics_for_videos(
             xs_pred,
             xs,

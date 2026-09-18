@@ -274,6 +274,7 @@ class BaseLightningExperiment(BaseExperiment):
             self.algo,
             dataloaders=val_dataloader,
             ckpt_path=self.ckpt_path,
+            weights_only=False,
         )
 
     def test(self) -> None:
